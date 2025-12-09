@@ -396,14 +396,6 @@ async function syncProduct(productId, env, options = {}) {
 		if (!cfg) {
 			console.error("Missing config for store, skipping", {
 				storeCode,
-				hasDomain:
-					storeCode === "autospec_perth"
-						? !!env.SHOPIFY_PERTH_DOMAIN
-						: !!env.SHOPIFY_RHINO_DOMAIN,
-				hasToken:
-					storeCode === "autospec_perth"
-						? !!env.SHOPIFY_PERTH_ADMIN_TOKEN
-						: !!env.SHOPIFY_RHINO_ADMIN_TOKEN,
 			});
 			continue;
 		}
@@ -686,6 +678,7 @@ function getStoreConfigOrNull(storeCode, env) {
 
 /**
  * Create a new product in target store from source product.
+ * Uses X-Idempotency-Key to avoid duplicate creation if called twice.
  */
 async function createProductInStoreWithConfig(
 	sourceProduct,
@@ -699,7 +692,17 @@ async function createProductInStoreWithConfig(
 		product: buildProductPayloadFromSource(sourceProduct),
 	};
 
-	const res = await shopifyRequest(cfg.domain, cfg.token, "POST", path, payload);
+	// Idempotency key per source product + target store
+	const idempotencyKey = `product-sync-${storeCode}-${sourceProduct.id}`;
+
+	const res = await shopifyRequest(
+		cfg.domain,
+		cfg.token,
+		"POST",
+		path,
+		payload,
+		idempotencyKey
+	);
 
 	if (!res.ok) {
 		const text = await res.text();
@@ -928,14 +931,26 @@ function buildProductPayloadFromSource(sourceProduct) {
 
 /**
  * Generic Shopify REST call.
+ * Optional idempotencyKey will be sent as X-Idempotency-Key.
  */
-async function shopifyRequest(shopDomain, token, method, path, body) {
+async function shopifyRequest(
+	shopDomain,
+	token,
+	method,
+	path,
+	body,
+	idempotencyKey
+) {
 	const url = `https://${shopDomain}${path}`;
 
 	const headers = {
 		"X-Shopify-Access-Token": token,
 		"Content-Type": "application/json",
 	};
+
+	if (idempotencyKey) {
+		headers["X-Idempotency-Key"] = idempotencyKey;
+	}
 
 	const init = { method, headers };
 
