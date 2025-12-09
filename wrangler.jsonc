@@ -1,0 +1,12 @@
+{
+  "name": "shopify-product-sync",
+  "main": "src/index.js",
+  "compatibility_date": "2025-12-09",
+
+	"vars": {
+		"SHOPIFY_SOURCE_DOMAIN": "autospec-group.myshopify.com",
+		"SHOPIFY_PERTH_DOMAIN": "line-x-australia.myshopify.com",
+		"SHOPIFY_RHINO_DOMAIN": "rhinohide.myshopify.com",
+		"SHOPIFY_API_VERSION": "2025-01"
+	}
+}
