@@ -786,6 +786,22 @@ async function tryAdoptExistingProductBySku(
 		});
 	}
 
+	// Verify the chosen product actually exists before trying to update it
+	const verifyPath = `/admin/api/${version}/products/${chosenProductId}.json`;
+	const verifyRes = await shopifyRequest(cfg.domain, cfg.token, "GET", verifyPath);
+
+	if (!verifyRes.ok) {
+		console.warn("tryAdoptExistingProductBySku: chosen product doesn't exist", {
+			storeCode,
+			storeDomain: cfg.domain,
+			chosenProductId,
+			status: verifyRes.status,
+			sku: firstSku,
+		});
+		// Product doesn't exist - can't adopt
+		return null;
+	}
+
 	const mapping = { product_id: chosenProductId };
 
 	console.log("tryAdoptExistingProductBySku: attempting to update product", {
