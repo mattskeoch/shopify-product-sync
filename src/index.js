@@ -85,7 +85,11 @@ async function handleShopifyWebhook(request, env) {
 	try {
 		await syncProduct(productId, env);
 	} catch (err) {
-		console.error("syncProduct failed", err);
+		console.error("syncProduct failed", {
+			productId,
+			error: err.message,
+			stack: err.stack,
+		});
 		// 500 so Shopify can retry
 		return new Response("sync error", { status: 500 });
 	}
@@ -390,6 +394,12 @@ async function syncProduct(productId, env, options = {}) {
 		const shouldTarget = effectiveTargets.includes(storeCode);
 		const existing = updatedRemoteIds[storeCode];
 
+		console.log("syncProduct: processing store", {
+			storeCode,
+			shouldTarget,
+			hasExisting: !!existing,
+		});
+
 		if (!shouldTarget) continue;
 
 		const cfg = getStoreConfigOrNull(storeCode, env);
@@ -400,6 +410,8 @@ async function syncProduct(productId, env, options = {}) {
 			continue;
 		}
 
+		console.log("syncProduct: calling syncToStoreWithConfig", { storeCode });
+
 		const entry = await syncToStoreWithConfig(
 			sourceProduct,
 			storeCode,
@@ -408,6 +420,12 @@ async function syncProduct(productId, env, options = {}) {
 			env,
 			forceRebuild
 		);
+
+		console.log("syncProduct: syncToStoreWithConfig returned", {
+			storeCode,
+			hasEntry: !!entry,
+		});
+
 		updatedRemoteIds[storeCode] = entry;
 	}
 
@@ -840,6 +858,12 @@ async function createProductInStoreWithConfig(
 	cfg,
 	env
 ) {
+	console.log("createProductInStoreWithConfig: starting", {
+		storeCode,
+		sourceProductId: sourceProduct.id,
+		storeDomain: cfg.domain,
+	});
+
 	// Create a new product with idempotency
 	// Note: Adoption logic removed due to issues with ghost products in Shopify API
 	const path = `/admin/api/${env.SHOPIFY_API_VERSION}/products.json`;
@@ -851,6 +875,12 @@ async function createProductInStoreWithConfig(
 	// Idempotency key per source product + target store
 	const idempotencyKey = `product-sync-${storeCode}-${sourceProduct.id}`;
 
+	console.log("createProductInStoreWithConfig: calling Shopify API", {
+		storeCode,
+		idempotencyKey,
+		path,
+	});
+
 	const res = await shopifyRequest(
 		cfg.domain,
 		cfg.token,
@@ -859,6 +889,12 @@ async function createProductInStoreWithConfig(
 		payload,
 		idempotencyKey
 	);
+
+	console.log("createProductInStoreWithConfig: API response", {
+		storeCode,
+		status: res.status,
+		ok: res.ok,
+	});
 
 	if (!res.ok) {
 		const text = await res.text();
