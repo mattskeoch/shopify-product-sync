@@ -611,6 +611,20 @@ async function fetchSourceSyncMetafields(productId, env) {
 	const data = await res.json();
 	const metafields = data.metafields || [];
 
+	console.log("fetchSourceSyncMetafields: received", {
+		productId,
+		metafieldCount: metafields.length,
+		metafields: metafields.map((mf) => ({
+			key: mf.key,
+			id: mf.id,
+			valueType: typeof mf.value,
+			valuePreview:
+				typeof mf.value === "string"
+					? mf.value.substring(0, 100)
+					: JSON.stringify(mf.value).substring(0, 100),
+		})),
+	});
+
 	let targets = [];
 	let remoteIds = {};
 	let remoteIdsMetafieldId = null;
@@ -652,6 +666,14 @@ async function fetchSourceSyncMetafields(productId, env) {
 			}
 		}
 	}
+
+	console.log("fetchSourceSyncMetafields: returning", {
+		productId,
+		hasTargets: targets.length > 0,
+		hasRemoteIds: Object.keys(remoteIds).length > 0,
+		remoteIds,
+		hasMetafieldId: !!remoteIdsMetafieldId,
+	});
 
 	return { targets, remoteIds, remoteIdsMetafieldId, remoteIdsRawValue };
 }
@@ -959,7 +981,18 @@ async function upsertRemoteIdsMetafield(
 	const value = JSON.stringify(remoteIdsObject || {});
 	const version = env.SHOPIFY_API_VERSION;
 
+	console.log("upsertRemoteIdsMetafield: called", {
+		productId,
+		hasRemoteIds: !!remoteIdsObject,
+		remoteIdsKeys: remoteIdsObject ? Object.keys(remoteIdsObject) : [],
+		hasExistingId: !!existingMetafieldId,
+		valueLength: value.length,
+	});
+
 	if (!remoteIdsObject || Object.keys(remoteIdsObject).length === 0) {
+		console.warn("upsertRemoteIdsMetafield: skipping - empty remoteIds", {
+			productId,
+		});
 		return;
 	}
 
@@ -970,10 +1003,17 @@ async function upsertRemoteIdsMetafield(
 			: existingRawValue;
 
 	if (existingMetafieldId && existingValue && existingValue === value) {
+		console.log("upsertRemoteIdsMetafield: skipping - no change", {
+			productId,
+		});
 		return;
 	}
 
 	if (existingMetafieldId) {
+		console.log("upsertRemoteIdsMetafield: updating metafield", {
+			productId,
+			metafieldId: existingMetafieldId,
+		});
 		const path = `/admin/api/${version}/metafields/${existingMetafieldId}.json`;
 		const payload = {
 			metafield: {
@@ -990,11 +1030,20 @@ async function upsertRemoteIdsMetafield(
 		);
 		if (!res.ok) {
 			const text = await res.text();
+			console.error("upsertRemoteIdsMetafield: update failed", {
+				productId,
+				status: res.status,
+				error: text,
+			});
 			throw new Error(
 				`Failed to update remote_ids metafield: ${res.status} ${text}`
 			);
 		}
+		console.log("upsertRemoteIdsMetafield: update succeeded", { productId });
 	} else {
+		console.log("upsertRemoteIdsMetafield: creating new metafield", {
+			productId,
+		});
 		const path = `/admin/api/${version}/products/${productId}/metafields.json`;
 		const payload = {
 			metafield: {
@@ -1013,10 +1062,20 @@ async function upsertRemoteIdsMetafield(
 		);
 		if (!res.ok) {
 			const text = await res.text();
+			console.error("upsertRemoteIdsMetafield: create failed", {
+				productId,
+				status: res.status,
+				error: text,
+			});
 			throw new Error(
 				`Failed to create remote_ids metafield: ${res.status} ${text}`
 			);
 		}
+		const createdData = await res.json();
+		console.log("upsertRemoteIdsMetafield: create succeeded", {
+			productId,
+			metafieldId: createdData.metafield?.id,
+		});
 	}
 }
 
