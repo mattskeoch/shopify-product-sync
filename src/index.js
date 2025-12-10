@@ -246,7 +246,7 @@ async function handleBackfillRhinoMappings(request, env) {
 					variants_by_sku: variantMap,
 				};
 
-				// Write metafield back to Store A (guarded against loops)
+				// Write metafield back to Store A
 				await upsertRemoteIdsMetafield(
 					p.id,
 					newRemoteIds,
@@ -677,7 +677,88 @@ function getStoreConfigOrNull(storeCode, env) {
 }
 
 /**
+ * Try to adopt an existing product in target store by SKU, instead of creating a new one.
+ * Returns a mapping if adoption succeeded, or null if nothing suitable found.
+ */
+async function tryAdoptExistingProductBySku(
+	sourceProduct,
+	storeCode,
+	cfg,
+	env
+) {
+	const version = env.SHOPIFY_API_VERSION;
+
+	// Take the first non-empty SKU as the key
+	const firstSku =
+		(sourceProduct.variants || []).map((v) => v.sku).find((s) => !!s) || null;
+
+	if (!firstSku) {
+		return null;
+	}
+
+	const path = `/admin/api/${version}/variants.json?sku=${encodeURIComponent(
+		firstSku
+	)}`;
+
+	const res = await shopifyRequest(cfg.domain, cfg.token, "GET", path);
+	if (!res.ok) {
+		const text = await res.text();
+		console.warn("tryAdoptExistingProductBySku: failed variants lookup", {
+			storeCode,
+			sku: firstSku,
+			status: res.status,
+			text,
+		});
+		return null;
+	}
+
+	const data = await res.json();
+	const variants = data.variants || [];
+	if (variants.length === 0) {
+		return null;
+	}
+
+	const productIds = new Set(variants.map((v) => v.product_id).filter(Boolean));
+	if (productIds.size !== 1) {
+		console.warn("tryAdoptExistingProductBySku: ambiguous product_ids", {
+			storeCode,
+			sku: firstSku,
+			productIds: Array.from(productIds),
+		});
+		return null;
+	}
+
+	const targetProductId = Array.from(productIds)[0];
+
+	console.log("tryAdoptExistingProductBySku: adopting existing product", {
+		storeCode,
+		sourceProductId: sourceProduct.id,
+		targetProductId,
+		sku: firstSku,
+	});
+
+	// Use the normal update path to align fields and collect variants_by_sku
+	const mapping = { product_id: targetProductId };
+	const entry = await updateProductInStoreWithConfig(
+		sourceProduct,
+		mapping,
+		storeCode,
+		cfg,
+		env
+	);
+
+	console.log("tryAdoptExistingProductBySku: adopted product", {
+		storeCode,
+		sourceProductId: sourceProduct.id,
+		targetProductId: entry.product_id,
+	});
+
+	return entry;
+}
+
+/**
  * Create a new product in target store from source product.
+ * First tries to adopt an existing product by SKU, then falls back to POST.
  * Uses X-Idempotency-Key to avoid duplicate creation if called twice.
  */
 async function createProductInStoreWithConfig(
@@ -686,6 +767,18 @@ async function createProductInStoreWithConfig(
 	cfg,
 	env
 ) {
+	// 1) Try to adopt an existing product by SKU
+	const adopted = await tryAdoptExistingProductBySku(
+		sourceProduct,
+		storeCode,
+		cfg,
+		env
+	);
+	if (adopted) {
+		return adopted;
+	}
+
+	// 2) Fall back to creating a new product with idempotency
 	const path = `/admin/api/${env.SHOPIFY_API_VERSION}/products.json`;
 
 	const payload = {
