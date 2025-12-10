@@ -885,6 +885,18 @@ async function updateProductInStoreWithConfig(
 	const currentRes = await shopifyRequest(cfg.domain, cfg.token, "GET", path);
 
 	if (!currentRes.ok) {
+		// If product doesn't exist (404), fall back to creating a new one
+		if (currentRes.status === 404) {
+			console.warn(
+				`updateProductInStoreWithConfig: product ${targetProductId} not found in ${storeCode}, creating new product instead`
+			);
+			return await createProductInStoreWithConfig(
+				sourceProduct,
+				storeCode,
+				cfg,
+				env
+			);
+		}
 		const text = await currentRes.text();
 		throw new Error(
 			`Failed to fetch existing product ${targetProductId} in ${storeCode}: ${currentRes.status} ${text}`
