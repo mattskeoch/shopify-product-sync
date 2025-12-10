@@ -840,18 +840,8 @@ async function createProductInStoreWithConfig(
 	cfg,
 	env
 ) {
-	// 1) Try to adopt an existing product by SKU only
-	const adopted = await tryAdoptExistingProductBySku(
-		sourceProduct,
-		storeCode,
-		cfg,
-		env
-	);
-	if (adopted) {
-		return adopted;
-	}
-
-	// 2) Fall back to creating a new product with idempotency
+	// Create a new product with idempotency
+	// Note: Adoption logic removed due to issues with ghost products in Shopify API
 	const path = `/admin/api/${env.SHOPIFY_API_VERSION}/products.json`;
 
 	const payload = {
