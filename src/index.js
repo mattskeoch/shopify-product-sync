@@ -410,8 +410,6 @@ async function syncProduct(productId, env, options = {}) {
 			continue;
 		}
 
-		console.log("syncProduct: calling syncToStoreWithConfig", { storeCode });
-
 		const entry = await syncToStoreWithConfig(
 			sourceProduct,
 			storeCode,
@@ -420,11 +418,6 @@ async function syncProduct(productId, env, options = {}) {
 			env,
 			forceRebuild
 		);
-
-		console.log("syncProduct: syncToStoreWithConfig returned", {
-			storeCode,
-			hasEntry: !!entry,
-		});
 
 		updatedRemoteIds[storeCode] = entry;
 	}
@@ -447,6 +440,12 @@ async function syncProduct(productId, env, options = {}) {
 
 /**
  * Sync one target store with an already-resolved config.
+ *
+ * Logic:
+ *  - If we already have a mapping and not forceRebuild → update that product.
+ *  - Else:
+ *      1) try to adopt an existing product by SKU (single canonical match)
+ *      2) if adoption fails → create a new product
  */
 async function syncToStoreWithConfig(
 	sourceProduct,
@@ -456,14 +455,16 @@ async function syncToStoreWithConfig(
 	env,
 	forceRebuild
 ) {
-	if (!existingMapping || !existingMapping.product_id || forceRebuild) {
-		const entry = await createProductInStoreWithConfig(
+	// If we already know the target product_id and not forcing rebuild, just update
+	if (existingMapping && existingMapping.product_id && !forceRebuild) {
+		const entry = await updateProductInStoreWithConfig(
 			sourceProduct,
+			existingMapping,
 			storeCode,
 			cfg,
 			env
 		);
-		console.log("Created product in store", {
+		console.log("Updated product in store", {
 			storeCode,
 			sourceProductId: sourceProduct.id,
 			targetProductId: entry.product_id,
@@ -471,14 +472,31 @@ async function syncToStoreWithConfig(
 		return entry;
 	}
 
-	const entry = await updateProductInStoreWithConfig(
+	// No mapping yet or forceRebuild: try to adopt by SKU first
+	const adopted = await tryAdoptExistingProductBySku(
 		sourceProduct,
-		existingMapping,
 		storeCode,
 		cfg,
 		env
 	);
-	console.log("Updated product in store", {
+
+	if (adopted && adopted.product_id) {
+		console.log("Adopted existing product by SKU", {
+			storeCode,
+			sourceProductId: sourceProduct.id,
+			targetProductId: adopted.product_id,
+		});
+		return adopted;
+	}
+
+	// No adoptable product: create a new one
+	const entry = await createProductInStoreWithConfig(
+		sourceProduct,
+		storeCode,
+		cfg,
+		env
+	);
+	console.log("Created product in store", {
 		storeCode,
 		sourceProductId: sourceProduct.id,
 		targetProductId: entry.product_id,
@@ -629,20 +647,6 @@ async function fetchSourceSyncMetafields(productId, env) {
 	const data = await res.json();
 	const metafields = data.metafields || [];
 
-	console.log("fetchSourceSyncMetafields: received", {
-		productId,
-		metafieldCount: metafields.length,
-		metafields: metafields.map((mf) => ({
-			key: mf.key,
-			id: mf.id,
-			valueType: typeof mf.value,
-			valuePreview:
-				typeof mf.value === "string"
-					? mf.value.substring(0, 100)
-					: JSON.stringify(mf.value).substring(0, 100),
-		})),
-	});
-
 	let targets = [];
 	let remoteIds = {};
 	let remoteIdsMetafieldId = null;
@@ -669,7 +673,6 @@ async function fetchSourceSyncMetafields(productId, env) {
 		if (mf.key === "remote_ids") {
 			remoteIdsMetafieldId = mf.id;
 			remoteIdsRawValue = mf.value;
-			// In API 2021-01+, JSON metafields are returned as objects, not strings
 			if (typeof mf.value === "object" && mf.value !== null) {
 				remoteIds = mf.value;
 			} else if (typeof mf.value === "string") {
@@ -684,14 +687,6 @@ async function fetchSourceSyncMetafields(productId, env) {
 			}
 		}
 	}
-
-	console.log("fetchSourceSyncMetafields: returning", {
-		productId,
-		hasTargets: targets.length > 0,
-		hasRemoteIds: Object.keys(remoteIds).length > 0,
-		remoteIds,
-		hasMetafieldId: !!remoteIdsMetafieldId,
-	});
 
 	return { targets, remoteIds, remoteIdsMetafieldId, remoteIdsRawValue };
 }
@@ -723,7 +718,8 @@ function getStoreConfigOrNull(storeCode, env) {
 
 /**
  * Try to adopt an existing product in target store by SKU only.
- * If multiple products share that SKU, pick one deterministically (lowest product_id).
+ * If multiple products share that SKU, pick one deterministically (lowest product_id),
+ * then update it to match the source and return a mapping.
  * Returns a mapping if adoption succeeded, or null if no SKU / no match.
  */
 async function tryAdoptExistingProductBySku(
@@ -761,11 +757,6 @@ async function tryAdoptExistingProductBySku(
 	const variants = data.variants || [];
 
 	if (variants.length === 0) {
-		console.log("tryAdoptExistingProductBySku: no variants found", {
-			storeCode,
-			storeDomain: cfg.domain,
-			sku: firstSku,
-		});
 		return null;
 	}
 
@@ -777,36 +768,35 @@ async function tryAdoptExistingProductBySku(
 		return null;
 	}
 
-	// Deterministically pick the smallest product_id
-	const chosenProductId = productIds.reduce((min, id) => {
-		return min === null || id < min ? id : min;
-	}, null);
+	// Pick the smallest product_id deterministically
+	const uniqueIds = Array.from(new Set(productIds));
+	const chosenProductId = uniqueIds.reduce(
+		(min, id) => (min === null || id < min ? id : min),
+		null
+	);
 
 	if (chosenProductId === null) {
 		return null;
 	}
 
-	if (new Set(productIds).size > 1) {
+	if (uniqueIds.length > 1) {
 		console.warn("tryAdoptExistingProductBySku: multiple product_ids for SKU", {
 			storeCode,
 			storeDomain: cfg.domain,
 			sku: firstSku,
-			variantCount: variants.length,
-			allProductIds: Array.from(new Set(productIds)),
+			allProductIds: uniqueIds,
 			chosenProductId,
-		});
-	} else {
-		console.log("tryAdoptExistingProductBySku: single product match by SKU", {
-			storeCode,
-			storeDomain: cfg.domain,
-			sku: firstSku,
-			productId: chosenProductId,
 		});
 	}
 
-	// Verify the chosen product actually exists before trying to update it
+	// Verify the chosen product actually exists
 	const verifyPath = `/admin/api/${version}/products/${chosenProductId}.json`;
-	const verifyRes = await shopifyRequest(cfg.domain, cfg.token, "GET", verifyPath);
+	const verifyRes = await shopifyRequest(
+		cfg.domain,
+		cfg.token,
+		"GET",
+		verifyPath
+	);
 
 	if (!verifyRes.ok) {
 		console.warn("tryAdoptExistingProductBySku: chosen product doesn't exist", {
@@ -816,19 +806,11 @@ async function tryAdoptExistingProductBySku(
 			status: verifyRes.status,
 			sku: firstSku,
 		});
-		// Product doesn't exist - can't adopt
 		return null;
 	}
 
+	// Now update that product to match the source
 	const mapping = { product_id: chosenProductId };
-
-	console.log("tryAdoptExistingProductBySku: attempting to update product", {
-		storeCode,
-		storeDomain: cfg.domain,
-		chosenProductId,
-		sku: firstSku,
-	});
-
 	const entry = await updateProductInStoreWithConfig(
 		sourceProduct,
 		mapping,
@@ -837,20 +819,11 @@ async function tryAdoptExistingProductBySku(
 		env
 	);
 
-	console.log("tryAdoptExistingProductBySku: successfully adopted product", {
-		storeCode,
-		sourceProductId: sourceProduct.id,
-		targetProductId: entry.product_id,
-		sku: firstSku,
-	});
-
 	return entry;
 }
 
 /**
  * Create a new product in target store from source product.
- * First tries to adopt an existing product by SKU, then falls back to POST.
- * Uses X-Idempotency-Key to avoid duplicate creation if called twice.
  */
 async function createProductInStoreWithConfig(
 	sourceProduct,
@@ -858,43 +831,19 @@ async function createProductInStoreWithConfig(
 	cfg,
 	env
 ) {
-	console.log("createProductInStoreWithConfig: starting", {
-		storeCode,
-		sourceProductId: sourceProduct.id,
-		storeDomain: cfg.domain,
-	});
-
-	// Create a new product with idempotency
-	// Note: Adoption logic removed due to issues with ghost products in Shopify API
 	const path = `/admin/api/${env.SHOPIFY_API_VERSION}/products.json`;
 
 	const payload = {
 		product: buildProductPayloadFromSource(sourceProduct),
 	};
 
-	// Idempotency key per source product + target store
-	const idempotencyKey = `product-sync-${storeCode}-${sourceProduct.id}`;
-
-	console.log("createProductInStoreWithConfig: calling Shopify API", {
-		storeCode,
-		idempotencyKey,
-		path,
-	});
-
 	const res = await shopifyRequest(
 		cfg.domain,
 		cfg.token,
 		"POST",
 		path,
-		payload,
-		idempotencyKey
+		payload
 	);
-
-	console.log("createProductInStoreWithConfig: API response", {
-		storeCode,
-		status: res.status,
-		ok: res.ok,
-	});
 
 	if (!res.ok) {
 		const text = await res.text();
@@ -1023,39 +972,20 @@ async function upsertRemoteIdsMetafield(
 	const value = JSON.stringify(remoteIdsObject || {});
 	const version = env.SHOPIFY_API_VERSION;
 
-	console.log("upsertRemoteIdsMetafield: called", {
-		productId,
-		hasRemoteIds: !!remoteIdsObject,
-		remoteIdsKeys: remoteIdsObject ? Object.keys(remoteIdsObject) : [],
-		hasExistingId: !!existingMetafieldId,
-		valueLength: value.length,
-	});
-
 	if (!remoteIdsObject || Object.keys(remoteIdsObject).length === 0) {
-		console.warn("upsertRemoteIdsMetafield: skipping - empty remoteIds", {
-			productId,
-		});
 		return;
 	}
 
-	// Compare values, handling both string and object formats from Shopify
 	const existingValue =
 		typeof existingRawValue === "object"
 			? JSON.stringify(existingRawValue)
 			: existingRawValue;
 
 	if (existingMetafieldId && existingValue && existingValue === value) {
-		console.log("upsertRemoteIdsMetafield: skipping - no change", {
-			productId,
-		});
 		return;
 	}
 
 	if (existingMetafieldId) {
-		console.log("upsertRemoteIdsMetafield: updating metafield", {
-			productId,
-			metafieldId: existingMetafieldId,
-		});
 		const path = `/admin/api/${version}/metafields/${existingMetafieldId}.json`;
 		const payload = {
 			metafield: {
@@ -1072,20 +1002,11 @@ async function upsertRemoteIdsMetafield(
 		);
 		if (!res.ok) {
 			const text = await res.text();
-			console.error("upsertRemoteIdsMetafield: update failed", {
-				productId,
-				status: res.status,
-				error: text,
-			});
 			throw new Error(
 				`Failed to update remote_ids metafield: ${res.status} ${text}`
 			);
 		}
-		console.log("upsertRemoteIdsMetafield: update succeeded", { productId });
 	} else {
-		console.log("upsertRemoteIdsMetafield: creating new metafield", {
-			productId,
-		});
 		const path = `/admin/api/${version}/products/${productId}/metafields.json`;
 		const payload = {
 			metafield: {
@@ -1104,20 +1025,10 @@ async function upsertRemoteIdsMetafield(
 		);
 		if (!res.ok) {
 			const text = await res.text();
-			console.error("upsertRemoteIdsMetafield: create failed", {
-				productId,
-				status: res.status,
-				error: text,
-			});
 			throw new Error(
 				`Failed to create remote_ids metafield: ${res.status} ${text}`
 			);
 		}
-		const createdData = await res.json();
-		console.log("upsertRemoteIdsMetafield: create succeeded", {
-			productId,
-			metafieldId: createdData.metafield?.id,
-		});
 	}
 }
 
@@ -1166,7 +1077,6 @@ function buildProductPayloadFromSource(sourceProduct) {
 
 /**
  * Generic Shopify REST call.
- * Optional idempotencyKey will be sent as X-Idempotency-Key.
  */
 async function shopifyRequest(
 	shopDomain,
