@@ -637,13 +637,18 @@ async function fetchSourceSyncMetafields(productId, env) {
 		if (mf.key === "remote_ids") {
 			remoteIdsMetafieldId = mf.id;
 			remoteIdsRawValue = mf.value;
-			try {
-				const parsed = JSON.parse(mf.value);
-				if (parsed && typeof parsed === "object") {
-					remoteIds = parsed;
+			// In API 2021-01+, JSON metafields are returned as objects, not strings
+			if (typeof mf.value === "object" && mf.value !== null) {
+				remoteIds = mf.value;
+			} else if (typeof mf.value === "string") {
+				try {
+					const parsed = JSON.parse(mf.value);
+					if (parsed && typeof parsed === "object") {
+						remoteIds = parsed;
+					}
+				} catch {
+					console.warn("Failed to parse remote_ids JSON for", productId);
 				}
-			} catch {
-				console.warn("Failed to parse remote_ids JSON for", productId);
 			}
 		}
 	}
@@ -941,7 +946,13 @@ async function upsertRemoteIdsMetafield(
 		return;
 	}
 
-	if (existingMetafieldId && existingRawValue && existingRawValue === value) {
+	// Compare values, handling both string and object formats from Shopify
+	const existingValue =
+		typeof existingRawValue === "object"
+			? JSON.stringify(existingRawValue)
+			: existingRawValue;
+
+	if (existingMetafieldId && existingValue && existingValue === value) {
 		return;
 	}
 
