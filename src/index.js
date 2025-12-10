@@ -750,6 +750,19 @@ async function tryAdoptExistingProductBySku(
 
 	const data = await res.json();
 	const variants = data.variants || [];
+
+	console.log("tryAdoptExistingProductBySku: API returned variants", {
+		storeCode,
+		storeDomain: cfg.domain,
+		sku: firstSku,
+		variantCount: variants.length,
+		variants: variants.map((v) => ({
+			variantId: v.id,
+			productId: v.product_id,
+			title: v.title,
+		})),
+	});
+
 	if (variants.length === 0) {
 		return null;
 	}
