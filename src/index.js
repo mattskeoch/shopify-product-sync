@@ -677,88 +677,153 @@ function getStoreConfigOrNull(storeCode, env) {
 }
 
 /**
- * Try to adopt an existing product in target store by SKU, instead of creating a new one.
+ * Try to adopt an existing product in target store:
+ *  1) by SKU
+ *  2) if that fails, by exact title
  * Returns a mapping if adoption succeeded, or null if nothing suitable found.
  */
-async function tryAdoptExistingProductBySku(
-	sourceProduct,
-	storeCode,
-	cfg,
-	env
-) {
+async function tryAdoptExistingProduct(sourceProduct, storeCode, cfg, env) {
 	const version = env.SHOPIFY_API_VERSION;
 
-	// Take the first non-empty SKU as the key
+	// ---------- 1) Try by SKU (first non-empty SKU) ----------
 	const firstSku =
 		(sourceProduct.variants || []).map((v) => v.sku).find((s) => !!s) || null;
 
-	if (!firstSku) {
+	if (firstSku) {
+		const skuPath = `/admin/api/${version}/variants.json?sku=${encodeURIComponent(
+			firstSku
+		)}`;
+
+		const skuRes = await shopifyRequest(cfg.domain, cfg.token, "GET", skuPath);
+		if (skuRes.ok) {
+			const data = await skuRes.json();
+			const variants = data.variants || [];
+			if (variants.length > 0) {
+				const productIds = new Set(
+					variants.map((v) => v.product_id).filter(Boolean)
+				);
+				if (productIds.size === 1) {
+					const targetProductId = Array.from(productIds)[0];
+
+					console.log("tryAdoptExistingProduct: adopting by SKU", {
+						storeCode,
+						sourceProductId: sourceProduct.id,
+						targetProductId,
+						sku: firstSku,
+					});
+
+					const mapping = { product_id: targetProductId };
+					const entry = await updateProductInStoreWithConfig(
+						sourceProduct,
+						mapping,
+						storeCode,
+						cfg,
+						env
+					);
+
+					console.log("tryAdoptExistingProduct: adopted by SKU", {
+						storeCode,
+						sourceProductId: sourceProduct.id,
+						targetProductId: entry.product_id,
+					});
+
+					return entry;
+				} else {
+					console.warn(
+						"tryAdoptExistingProduct: ambiguous product_ids for SKU",
+						{
+							storeCode,
+							sku: firstSku,
+							productIds: Array.from(productIds),
+						}
+					);
+				}
+			}
+		} else {
+			const text = await skuRes.text();
+			console.warn("tryAdoptExistingProduct: SKU lookup failed", {
+				storeCode,
+				sku: firstSku,
+				status: skuRes.status,
+				text,
+			});
+		}
+	}
+
+	// ---------- 2) Fallback: try by exact title ----------
+	const title = (sourceProduct.title || "").trim();
+	if (!title) {
 		return null;
 	}
 
-	const path = `/admin/api/${version}/variants.json?sku=${encodeURIComponent(
-		firstSku
-	)}`;
+	const titlePath = `/admin/api/${version}/products.json?title=${encodeURIComponent(
+		title
+	)}&status=any&limit=5`;
 
-	const res = await shopifyRequest(cfg.domain, cfg.token, "GET", path);
-	if (!res.ok) {
-		const text = await res.text();
-		console.warn("tryAdoptExistingProductBySku: failed variants lookup", {
+	const titleRes = await shopifyRequest(
+		cfg.domain,
+		cfg.token,
+		"GET",
+		titlePath
+	);
+	if (!titleRes.ok) {
+		const text = await titleRes.text();
+		console.warn("tryAdoptExistingProduct: title lookup failed", {
 			storeCode,
-			sku: firstSku,
-			status: res.status,
+			title,
+			status: titleRes.status,
 			text,
 		});
 		return null;
 	}
 
-	const data = await res.json();
-	const variants = data.variants || [];
-	if (variants.length === 0) {
-		return null;
-	}
-
-	const productIds = new Set(variants.map((v) => v.product_id).filter(Boolean));
-	if (productIds.size !== 1) {
-		console.warn("tryAdoptExistingProductBySku: ambiguous product_ids", {
-			storeCode,
-			sku: firstSku,
-			productIds: Array.from(productIds),
-		});
-		return null;
-	}
-
-	const targetProductId = Array.from(productIds)[0];
-
-	console.log("tryAdoptExistingProductBySku: adopting existing product", {
-		storeCode,
-		sourceProductId: sourceProduct.id,
-		targetProductId,
-		sku: firstSku,
-	});
-
-	// Use the normal update path to align fields and collect variants_by_sku
-	const mapping = { product_id: targetProductId };
-	const entry = await updateProductInStoreWithConfig(
-		sourceProduct,
-		mapping,
-		storeCode,
-		cfg,
-		env
+	const titleData = await titleRes.json();
+	const candidates = (titleData.products || []).filter(
+		(p) => (p.title || "").trim() === title
 	);
 
-	console.log("tryAdoptExistingProductBySku: adopted product", {
-		storeCode,
-		sourceProductId: sourceProduct.id,
-		targetProductId: entry.product_id,
-	});
+	if (candidates.length === 1) {
+		const targetProductId = candidates[0].id;
 
-	return entry;
+		console.log("tryAdoptExistingProduct: adopting by title", {
+			storeCode,
+			sourceProductId: sourceProduct.id,
+			targetProductId,
+			title,
+		});
+
+		const mapping = { product_id: targetProductId };
+		const entry = await updateProductInStoreWithConfig(
+			sourceProduct,
+			mapping,
+			storeCode,
+			cfg,
+			env
+		);
+
+		console.log("tryAdoptExistingProduct: adopted by title", {
+			storeCode,
+			sourceProductId: sourceProduct.id,
+			targetProductId: entry.product_id,
+		});
+
+		return entry;
+	}
+
+	if (candidates.length > 1) {
+		console.warn("tryAdoptExistingProduct: ambiguous products by title", {
+			storeCode,
+			title,
+			count: candidates.length,
+		});
+	}
+
+	return null;
 }
 
 /**
  * Create a new product in target store from source product.
- * First tries to adopt an existing product by SKU, then falls back to POST.
+ * First tries to adopt an existing product (SKU/title), then falls back to POST.
  * Uses X-Idempotency-Key to avoid duplicate creation if called twice.
  */
 async function createProductInStoreWithConfig(
@@ -767,8 +832,8 @@ async function createProductInStoreWithConfig(
 	cfg,
 	env
 ) {
-	// 1) Try to adopt an existing product by SKU
-	const adopted = await tryAdoptExistingProductBySku(
+	// 1) Try to adopt an existing product by SKU or title
+	const adopted = await tryAdoptExistingProduct(
 		sourceProduct,
 		storeCode,
 		cfg,
