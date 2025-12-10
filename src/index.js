@@ -411,6 +411,13 @@ async function syncProduct(productId, env, options = {}) {
 		updatedRemoteIds[storeCode] = entry;
 	}
 
+	console.log("syncProduct: before upsertRemoteIdsMetafield", {
+		productId,
+		updatedRemoteIds,
+		remoteIdsMetafieldId,
+		hasRemoteIdsRawValue: !!remoteIdsRawValue,
+	});
+
 	await upsertRemoteIdsMetafield(
 		productId,
 		updatedRemoteIds,
@@ -611,6 +618,12 @@ async function fetchSourceSyncMetafields(productId, env) {
 	const data = await res.json();
 	const metafields = data.metafields || [];
 
+	console.log("fetchSourceSyncMetafields: fetched metafields", {
+		productId,
+		metafieldCount: metafields.length,
+		metafieldKeys: metafields.map((mf) => mf.key),
+	});
+
 	let targets = [];
 	let remoteIds = {};
 	let remoteIdsMetafieldId = null;
@@ -637,14 +650,25 @@ async function fetchSourceSyncMetafields(productId, env) {
 		if (mf.key === "remote_ids") {
 			remoteIdsMetafieldId = mf.id;
 			remoteIdsRawValue = mf.value;
+			console.log("fetchSourceSyncMetafields: found remote_ids", {
+				metafieldId: mf.id,
+				valueType: typeof mf.value,
+				isNull: mf.value === null,
+			});
 			// In API 2021-01+, JSON metafields are returned as objects, not strings
 			if (typeof mf.value === "object" && mf.value !== null) {
 				remoteIds = mf.value;
+				console.log("fetchSourceSyncMetafields: using object value", {
+					remoteIds,
+				});
 			} else if (typeof mf.value === "string") {
 				try {
 					const parsed = JSON.parse(mf.value);
 					if (parsed && typeof parsed === "object") {
 						remoteIds = parsed;
+						console.log("fetchSourceSyncMetafields: parsed string value", {
+							remoteIds,
+						});
 					}
 				} catch {
 					console.warn("Failed to parse remote_ids JSON for", productId);
@@ -652,6 +676,13 @@ async function fetchSourceSyncMetafields(productId, env) {
 			}
 		}
 	}
+
+	console.log("fetchSourceSyncMetafields: returning", {
+		productId,
+		targets,
+		remoteIds,
+		hasRemoteIdsMetafieldId: !!remoteIdsMetafieldId,
+	});
 
 	return { targets, remoteIds, remoteIdsMetafieldId, remoteIdsRawValue };
 }
@@ -942,7 +973,15 @@ async function upsertRemoteIdsMetafield(
 	const value = JSON.stringify(remoteIdsObject || {});
 	const version = env.SHOPIFY_API_VERSION;
 
+	console.log("upsertRemoteIdsMetafield: called", {
+		productId,
+		hasRemoteIdsObject: !!remoteIdsObject,
+		remoteIdsObjectKeys: remoteIdsObject ? Object.keys(remoteIdsObject) : [],
+		existingMetafieldId,
+	});
+
 	if (!remoteIdsObject || Object.keys(remoteIdsObject).length === 0) {
+		console.log("upsertRemoteIdsMetafield: skipping - empty object");
 		return;
 	}
 
@@ -953,10 +992,14 @@ async function upsertRemoteIdsMetafield(
 			: existingRawValue;
 
 	if (existingMetafieldId && existingValue && existingValue === value) {
+		console.log("upsertRemoteIdsMetafield: skipping - no change");
 		return;
 	}
 
 	if (existingMetafieldId) {
+		console.log("upsertRemoteIdsMetafield: updating existing metafield", {
+			metafieldId: existingMetafieldId,
+		});
 		const path = `/admin/api/${version}/metafields/${existingMetafieldId}.json`;
 		const payload = {
 			metafield: {
@@ -973,11 +1016,17 @@ async function upsertRemoteIdsMetafield(
 		);
 		if (!res.ok) {
 			const text = await res.text();
+			console.error("upsertRemoteIdsMetafield: update failed", {
+				status: res.status,
+				text,
+			});
 			throw new Error(
 				`Failed to update remote_ids metafield: ${res.status} ${text}`
 			);
 		}
+		console.log("upsertRemoteIdsMetafield: update succeeded");
 	} else {
+		console.log("upsertRemoteIdsMetafield: creating new metafield");
 		const path = `/admin/api/${version}/products/${productId}/metafields.json`;
 		const payload = {
 			metafield: {
@@ -996,10 +1045,15 @@ async function upsertRemoteIdsMetafield(
 		);
 		if (!res.ok) {
 			const text = await res.text();
+			console.error("upsertRemoteIdsMetafield: create failed", {
+				status: res.status,
+				text,
+			});
 			throw new Error(
 				`Failed to create remote_ids metafield: ${res.status} ${text}`
 			);
 		}
+		console.log("upsertRemoteIdsMetafield: create succeeded");
 	}
 }
 
