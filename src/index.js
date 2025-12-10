@@ -721,6 +721,11 @@ async function tryAdoptExistingProductBySku(
 	const variants = data.variants || [];
 
 	if (variants.length === 0) {
+		console.log("tryAdoptExistingProductBySku: no variants found", {
+			storeCode,
+			storeDomain: cfg.domain,
+			sku: firstSku,
+		});
 		return null;
 	}
 
@@ -744,19 +749,30 @@ async function tryAdoptExistingProductBySku(
 	if (new Set(productIds).size > 1) {
 		console.warn("tryAdoptExistingProductBySku: multiple product_ids for SKU", {
 			storeCode,
+			storeDomain: cfg.domain,
 			sku: firstSku,
+			variantCount: variants.length,
 			allProductIds: Array.from(new Set(productIds)),
 			chosenProductId,
 		});
 	} else {
 		console.log("tryAdoptExistingProductBySku: single product match by SKU", {
 			storeCode,
+			storeDomain: cfg.domain,
 			sku: firstSku,
 			productId: chosenProductId,
 		});
 	}
 
 	const mapping = { product_id: chosenProductId };
+
+	console.log("tryAdoptExistingProductBySku: attempting to update product", {
+		storeCode,
+		storeDomain: cfg.domain,
+		chosenProductId,
+		sku: firstSku,
+	});
+
 	const entry = await updateProductInStoreWithConfig(
 		sourceProduct,
 		mapping,
@@ -765,7 +781,7 @@ async function tryAdoptExistingProductBySku(
 		env
 	);
 
-	console.log("tryAdoptExistingProductBySku: adopted product", {
+	console.log("tryAdoptExistingProductBySku: successfully adopted product", {
 		storeCode,
 		sourceProductId: sourceProduct.id,
 		targetProductId: entry.product_id,
